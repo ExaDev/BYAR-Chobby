@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ExaDev/spring-launcher
-          ref: macos
+          ref: main
           path: launcher
 
       - name: Setup NodeJs
@@ -261,7 +261,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ExaDev/spring-launcher
-          ref: macos
+          ref: main
           path: launcher
 
       - name: Setup NodeJs
