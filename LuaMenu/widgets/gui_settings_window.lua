@@ -2323,6 +2323,16 @@ function widget:Initialize()
 			Configuration:SetSpringsettingsValue("Fullscreen", 1)
 		end
 
+		-- macOS: a borderless window has no title bar (no close/minimise/
+		-- maximise) and the Zink/KosmicKrisp path expects a decorated window.
+		-- This runs after SetLobbyFullscreenMode above and is the one that
+		-- both applies and persists the value, so force it bordered here.
+		-- Borderless modes (1/4) become bordered windows; fullscreen modes
+		-- (3/5) keep Fullscreen=1 and are unaffected.
+		if Platform and (Platform.osFamily == "MacOS" or Platform.osFamily == "MacOSX") then
+			Configuration:SetSpringsettingsValue("WindowBorderless", 0)
+		end
+
 		-- only run once, ever
 		local firstRun = tonumber(Spring.GetConfigInt("FirstRun", 1) or 1) == 1
 		if firstRun then
