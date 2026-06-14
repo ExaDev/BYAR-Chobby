@@ -1,0 +1,213 @@
+name: Chobby macOS (combined bar bundle)
+
+on:
+  # Manual trigger from the Actions tab.
+  workflow_dispatch:
+  # Rebuild on every push to the fork's default branch.
+  push:
+    branches:
+      - macos-port
+  # Refresh the combined bundle daily so it picks up new bar-lobby thin DMGs
+  # (bar-lobby releases on every push; this re-packs the latest lobby app
+  # alongside the Chobby app without needing a cross-repo trigger).
+  schedule:
+    - cron: "23 5 * * *"
+
+# The build job creates a GitHub Release on this repo and pushes the cask bump,
+# which needs write access.
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # macos-latest is Apple Silicon (arm64), which matches the arm64-only DMG
+    # target in spring-launcher's macos branch.
+    runs-on: macos-latest
+    steps:
+      # This repo (BYAR-Chobby) carries dist_cfg and the make_package_json.js
+      # build helper. fetch-depth: 0 is required for `git rev-list --count HEAD`
+      # to produce a stable version number. https://stackoverflow.com/a/65056108
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: BYAR-Chobby
+
+      # Our macOS port of the launcher. The 'macos' branch adds the build-mac
+      # script, the arm64 DMG target, and the runtime engine downloader that
+      # fetches the engine from ExaDev/RecoilEngine, so the DMG never bundles
+      # an engine.
+      - uses: actions/checkout@v4
+        with:
+          repository: ExaDev/spring-launcher
+          ref: macos
+          path: launcher
+
+      - name: Setup NodeJs
+        uses: actions/setup-node@v4
+        with:
+          node-version: 16
+          cache: 'npm'
+          cache-dependency-path: launcher/package-lock.json
+
+      # Identical to launcher.yml: drop dist_cfg into the launcher's src/, then
+      # promote the bin/files/build subtrees up to the launcher root.
+      - name: Patch launcher with dist_cfg
+        run: |
+          cp -r BYAR-Chobby/dist_cfg/* launcher/src/
+          for dir in bin files build; do
+            mkdir -p launcher/$dir
+            if [ -d launcher/src/$dir/ ]; then
+              mv launcher/src/$dir/* launcher/$dir/
+              rm -rf launcher/src/$dir
+            fi
+          done
+          exit 0
+
+      # Stamp version (1.<commit-count>.0), appId, name and repository into the
+      # launcher's package.json.
+      - name: Make package.json
+        run: |
+          cd BYAR-Chobby
+          export PACKAGE_VERSION=1.$(git rev-list --count HEAD).0
+          echo "Making build for version: $PACKAGE_VERSION"
+          node build/make_package_json.js ../launcher/package.json dist_cfg/config.json $GITHUB_REPOSITORY $PACKAGE_VERSION
+          echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+
+      # Pin productName + dmg artifact name so the Chobby app is
+      # "Beyond All Reason (Chobby)" (distinct from bar-lobby's "BeyondAllReason")
+      # and does not collide inside the combined DMG.
+      - name: Override macOS productName and DMG artifact name
+        run: |
+          cd launcher
+          node -e '
+            const fs = require("fs");
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            p.build = p.build || {};
+            p.build.productName = "Beyond All Reason (Chobby)";
+            p.build.dmg = p.build.dmg || {};
+            p.build.dmg.artifactName = "BeyondAllReason-Chobby-${version}-mac-arm64.dmg";
+            fs.writeFileSync("package.json", JSON.stringify(p), "utf8");
+          '
+          node -e 'const p=require("./package.json"); console.log("productName:", p.build.productName); console.log("dmg.artifactName:", p.build.dmg.artifactName); console.log("version:", p.version);'
+
+      - name: Cache electron
+        uses: actions/cache@v4
+        with:
+          path: .electron-cache
+          key: ${{ runner.os }}-electron-cache-${{ hashFiles('launcher/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-cache-
+
+      # build-mac runs `electron-builder -m` (mac.identity null => ad-hoc sign).
+      - name: Build Chobby macOS app
+        run: |
+          cd launcher
+          npm ci
+          npm run build-mac
+        env:
+          ELECTRON_CACHE: ${{ github.workspace }}/.electron-cache/main
+          ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.electron-cache/builder
+
+      # Assemble ONE combined DMG carrying BOTH thin apps:
+      #   - BeyondAllReason.app          (bar-lobby, fetched from its latest release)
+      #   - Beyond All Reason (Chobby).app (built above)
+      # Both are thin launchers that download the shared engine at runtime, so the
+      # combined DMG stays small (~300MB) with no engine duplication. The single
+      # 'bar' cask installs both with two app stanzas.
+      - name: Assemble combined bar bundle DMG
+        id: bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/bar-bundle"
+          mkdir -p "$STAGE"
+
+          # 1. Chobby app from the DMG we just built.
+          CHOBBY_DMG="launcher/dist/BeyondAllReason-Chobby-${PACKAGE_VERSION}-mac-arm64.dmg"
+          [ -f "$CHOBBY_DMG" ] || { echo "::error::Chobby DMG missing: $CHOBBY_DMG"; ls -la launcher/dist || true; exit 1; }
+          MNT_C=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$MNT_C" "$CHOBBY_DMG"
+          cp -R "$MNT_C/Beyond All Reason (Chobby).app" "$STAGE/"
+          hdiutil detach "$MNT_C"
+
+          # 2. Latest bar-lobby thin DMG (public repo, token-free).
+          LOBBY_TAG=$(gh release list --repo ExaDev/bar-lobby --limit 30 \
+            --json tagName,isDraft,publishedAt \
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))]
+                  | sort_by(.publishedAt) | reverse | .[0].tagName')
+          [ -n "$LOBBY_TAG" ] || { echo "::error::no bar-lobby release found"; exit 1; }
+          echo "Using bar-lobby release $LOBBY_TAG"
+          mkdir -p "$RUNNER_TEMP/lobby"
+          gh release download "$LOBBY_TAG" --repo ExaDev/bar-lobby \
+            --pattern 'BeyondAllReason-*-mac-arm64.dmg' --dir "$RUNNER_TEMP/lobby"
+          LOBBY_DMG=$(ls "$RUNNER_TEMP"/lobby/BeyondAllReason-*-mac-arm64.dmg | head -1)
+          MNT_L=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$MNT_L" "$LOBBY_DMG"
+          cp -R "$MNT_L/BeyondAllReason.app" "$STAGE/"
+          hdiutil detach "$MNT_L"
+
+          # 3. Build the combined DMG (both apps + an Applications symlink).
+          ln -s /Applications "$STAGE/Applications"
+          OUT="$RUNNER_TEMP/BeyondAllReason-bundle-${PACKAGE_VERSION}-mac-arm64.dmg"
+          hdiutil create -ov -volname "Beyond All Reason" -fs HFS+ \
+            -srcfolder "$STAGE" -format UDZO "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$OUT")" >> "$GITHUB_OUTPUT"
+          ls -la "$OUT"
+
+      - name: Publish combined GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${PACKAGE_VERSION}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.bundle.outputs.path }}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "${{ steps.bundle.outputs.path }}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Beyond All Reason (lobby + chobby) $TAG" \
+              --notes "Combined macOS (arm64) bundle: BeyondAllReason.app (bar-lobby) and Beyond All Reason (Chobby).app. Both are thin launchers that fetch the shared engine from ExaDev/RecoilEngine at runtime. Ad-hoc signed (not notarised); after install clear quarantine: xattr -dr com.apple.quarantine \"/Applications/Beyond All Reason.app\" \"/Applications/Beyond All Reason (Chobby).app\""
+          fi
+
+  # Bump the single 'bar' cask to the combined bundle via the scoped SSH deploy
+  # key (no PAT). The cask carries two app stanzas; only version + sha256 change.
+  update-cask:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap via SSH deploy key
+        uses: actions/checkout@v4
+        with:
+          repository: ExaDev/homebrew-bar
+          ssh-key: ${{ secrets.CHOBBY_TAP_DEPLOY_KEY }}
+      - name: Update bar cask to the combined bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(gh release list --repo ExaDev/BYAR-Chobby --limit 30 \
+            --json tagName,isDraft,publishedAt \
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))]
+                  | sort_by(.publishedAt) | reverse | .[0].tagName')
+          VERSION="${TAG#v}"
+          ASSET="BeyondAllReason-bundle-${VERSION}-mac-arm64.dmg"
+          URL="https://github.com/ExaDev/BYAR-Chobby/releases/download/${TAG}/${ASSET}"
+          gh release view "$TAG" --repo ExaDev/BYAR-Chobby --json assets \
+            --jq '.assets[].name' | grep -qx "$ASSET" \
+            || { echo "::error::$ASSET not on $TAG"; exit 1; }
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors "$URL" -o /tmp/bundle.dmg
+          SHA=$(shasum -a 256 /tmp/bundle.dmg | cut -d' ' -f1)
+          [[ "$SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad sha256: $SHA"; exit 1; }
+          sed -i -E "s/^  version \".*\"/  version \"${VERSION}\"/" Casks/bar.rb
+          sed -i -E "s/^  sha256 .*/  sha256 \"${SHA}\"/" Casks/bar.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/bar.rb
+          git diff --cached --quiet || git commit -m "bar (lobby + chobby) ${VERSION}"
+          git push
