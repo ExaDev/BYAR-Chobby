@@ -2160,6 +2160,13 @@ function SettingsWindow.WriteGameSpringsettings(fileName)
 		WriteToFile("WindowBorderless", 0)
 		WriteToFile("Fullscreen", 1)
 	end
+	-- macOS: a borderless window has no title bar (no close/minimise/maximise)
+	-- and the Zink/KosmicKrisp path expects a decorated window, so never start
+	-- the game borderless. Borderless modes (1/4) become bordered windows;
+	-- fullscreen modes (3/5) keep Fullscreen=1 and are unaffected.
+	if Platform and (Platform.osFamily == "MacOS" or Platform.osFamily == "MacOSX") then
+		WriteToFile("WindowBorderless", 0)
+	end
 end
 
 function SettingsWindow.GetSettingsString()
@@ -2211,6 +2218,12 @@ function SettingsWindow.GetSettingsString()
 		WriteSetting("YResolution", resolution.height or screenY)
 		WriteSetting("WindowBorderless", 0)
 		WriteSetting("Fullscreen", 1)
+	end
+	-- macOS: never start the game borderless (no title bar; Zink/KosmicKrisp
+	-- expects a decorated window). Borderless modes become bordered windows;
+	-- fullscreen modes keep Fullscreen=1 and are unaffected.
+	if Platform and (Platform.osFamily == "MacOS" or Platform.osFamily == "MacOSX") then
+		WriteSetting("WindowBorderless", 0)
 	end
 
 	return settingsString
