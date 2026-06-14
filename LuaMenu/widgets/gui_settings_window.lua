@@ -228,6 +228,14 @@ local function SetLobbyFullscreenMode(mode, borderOverride)
 		Spring.SetConfigInt("Fullscreen", 1, false)
 	end
 
+	-- macOS: borderless-windowed has no title bar / resize controls and the
+	-- Zink/KosmicKrisp path expects a real decorated window, so never leave
+	-- the window borderless. Windowed modes (1/2/4/6) become bordered;
+	-- Fullscreen modes (3/5) are unaffected since they set Fullscreen=1.
+	if Platform and (Platform.osFamily == "MacOS" or Platform.osFamily == "MacOSX") then
+		Spring.SetConfigInt("WindowBorderless", 0, false)
+	end
+
 	if delayedModeSet == mode then
 		delayedModeSet = nil
 		delayedBorderOverride = nil
