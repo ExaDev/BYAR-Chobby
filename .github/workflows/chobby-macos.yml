@@ -90,6 +90,13 @@ jobs:
             p.build.productName = "Beyond All Reason (Chobby)";
             p.build.dmg = p.build.dmg || {};
             p.build.dmg.artifactName = "BeyondAllReason-Chobby-${version}-mac-arm64.dmg";
+            // Bundle the patched pr-downloader (staged into launcher/bin below)
+            // into the app at Contents/bin, where spring_platform resolves it
+            // (process.resourcesPath/../bin). Matches win/linux bundling.
+            p.build.mac = p.build.mac || {};
+            p.build.mac.extraFiles = (p.build.mac.extraFiles || []).concat([
+              { from: "bin/pr-downloader", to: "bin/pr-downloader" }
+            ]);
             fs.writeFileSync("package.json", JSON.stringify(p), "utf8");
           '
           node -e 'const p=require("./package.json"); console.log("productName:", p.build.productName); console.log("dmg.artifactName:", p.build.dmg.artifactName); console.log("version:", p.version);'
@@ -114,6 +121,31 @@ jobs:
           else
             echo "::warning::$ICON not found; electron-builder will use its default icon"
           fi
+
+      # Stage the patched pr-downloader from the engine release into launcher/bin
+      # so electron-builder bundles it (mac.extraFiles, set above). It is our
+      # HTTP/1.1 fork and self-contained (links only system libs), so the macOS
+      # game-download path matches win/linux and works at load (no engine race).
+      - name: Bundle patched pr-downloader from the engine release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p launcher/bin /tmp/eng
+          TAG=$(gh release list --repo ExaDev/RecoilEngine --limit 30 \
+            --json tagName,isDraft,publishedAt \
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("engine-macos-arm64-"))]
+                  | sort_by(.publishedAt) | reverse | .[0].tagName')
+          [ -n "$TAG" ] || { echo "::error::no engine release found"; exit 1; }
+          gh release download "$TAG" --repo ExaDev/RecoilEngine \
+            --pattern 'engine-macos-arm64-*.tar.gz' --dir /tmp/eng
+          TARBALL=$(ls /tmp/eng/engine-macos-arm64-*.tar.gz | head -1)
+          tar -xzf "$TARBALL" -C /tmp/eng
+          PRD=$(find /tmp/eng -name pr-downloader -type f | head -1)
+          [ -n "$PRD" ] || { echo "::error::pr-downloader not found in engine $TAG"; exit 1; }
+          cp "$PRD" launcher/bin/pr-downloader
+          chmod +x launcher/bin/pr-downloader
+          echo "bundled pr-downloader from $TAG:"; otool -L launcher/bin/pr-downloader | head -3
 
       # build-mac runs `electron-builder -m` (mac.identity null => ad-hoc sign).
       - name: Build Chobby macOS app
