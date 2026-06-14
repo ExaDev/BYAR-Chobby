@@ -120,7 +120,10 @@ jobs:
         run: |
           cd launcher
           npm ci
-          npm run build-mac
+          # --publish never: we create the GitHub release ourselves below, so
+          # electron-builder must not try to publish (it would fail on a missing
+          # token in CI).
+          npm run build-mac -- --publish never
         env:
           ELECTRON_CACHE: ${{ github.workspace }}/.electron-cache/main
           ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.electron-cache/builder
@@ -217,20 +220,21 @@ jobs:
           cache: 'npm'
           cache-dependency-path: launcher/package-lock.json
 
-      # Identical to the mac job, but in PowerShell because this leg runs on
-      # windows-latest: drop dist_cfg into the launcher's src/, then promote the
-      # bin/files/build subtrees up to the launcher root.
+      # Identical to the mac job. Use bash (git-bash is on windows-latest) because
+      # `cp -r` merges into the existing launcher/src tree, whereas PowerShell's
+      # Copy-Item -Recurse errors when a target subdir (e.g. src/renderer) exists.
       - name: Patch launcher with dist_cfg
-        shell: pwsh
+        shell: bash
         run: |
-          Copy-Item -Recurse BYAR-Chobby/dist_cfg/* launcher/src/
-          foreach ($dir in @('bin', 'files', 'build')) {
-            New-Item -ItemType Directory -Path "launcher/$dir" -Force | Out-Null
-            if (Test-Path "launcher/src/$dir") {
-              Move-Item "launcher/src/$dir/*" "launcher/$dir/" -Force
-              Remove-Item "launcher/src/$dir" -Recurse -Force
-            }
-          }
+          cp -r BYAR-Chobby/dist_cfg/* launcher/src/
+          for dir in bin files build; do
+            mkdir -p launcher/$dir
+            if [ -d launcher/src/$dir/ ]; then
+              mv launcher/src/$dir/* launcher/$dir/
+              rm -rf launcher/src/$dir
+            fi
+          done
+          exit 0
 
       # Stamp version (1.<commit-count>.0), appId, name and repository into the
       # launcher's package.json. Same helper and version formula as the mac job.
@@ -279,7 +283,9 @@ jobs:
         run: |
           Set-Location launcher
           npm ci
-          npm run build-win
+          # --publish never: the release is created explicitly later; electron-builder
+          # must not attempt to publish (it would fail on a missing token in CI).
+          npm run build-win -- --publish never
         env:
           ELECTRON_CACHE: ${{ github.workspace }}/.electron-cache/main
           ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.electron-cache/builder
