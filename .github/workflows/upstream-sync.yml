@@ -22,7 +22,7 @@ concurrency:
 env:
   UPSTREAM: beyond-all-reason/BYAR-Chobby
   MIRROR_BRANCH: master
-  WORK_BRANCH: macos-port
+  WORK_BRANCH: main
 
 jobs:
   sync:

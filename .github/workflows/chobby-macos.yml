@@ -6,7 +6,7 @@ on:
   # Rebuild on every push to the fork's default branch.
   push:
     branches:
-      - macos-port
+      - main
   # Refresh the combined bundle daily so it picks up new bar-lobby thin DMGs
   # (bar-lobby releases on every push; this re-packs the latest lobby app
   # alongside the Chobby app without needing a cross-repo trigger).
