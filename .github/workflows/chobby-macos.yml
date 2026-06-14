@@ -176,7 +176,17 @@ jobs:
           cp -R "$MNT_L/BeyondAllReason.app" "$STAGE/"
           hdiutil detach "$MNT_L"
 
-          # 3. Build the combined DMG (both apps + an Applications symlink).
+          # 3. Re-sign both apps ad-hoc. Copying a .app out of a mounted DMG
+          # invalidates its code signature (_CodeSignature/CodeResources no longer
+          # matches), and macOS SIGKILLs an invalidly-signed app on launch with no
+          # output. Re-sign in place so the apps launch straight from the cask.
+          for app in "$STAGE/BeyondAllReason.app" "$STAGE/Beyond All Reason (Chobby).app"; do
+            codesign --remove-signature "$app" 2>/dev/null || true
+            codesign --force --deep --sign - "$app"
+            codesign --verify --strict "$app" && echo "re-signed OK: $app"
+          done
+
+          # 4. Build the combined DMG (both apps + an Applications symlink).
           ln -s /Applications "$STAGE/Applications"
           OUT="$RUNNER_TEMP/BeyondAllReason-bundle-${PACKAGE_VERSION}-mac-arm64.dmg"
           hdiutil create -ov -volname "Beyond All Reason" -fs HFS+ \
