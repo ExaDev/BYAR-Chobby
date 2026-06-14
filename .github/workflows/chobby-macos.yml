@@ -102,6 +102,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-electron-cache-
 
+      # electron-builder's macOS target requires an icon of at least 512x512.
+      # dist_cfg ships a 256x256 build/icon.png (fine for win/linux), so upscale
+      # the copy promoted into launcher/build before building the DMG.
+      - name: Ensure macOS icon is at least 512x512
+        run: |
+          ICON="launcher/build/icon.png"
+          if [ -f "$ICON" ]; then
+            sips -z 1024 1024 "$ICON" --out "$ICON"
+            sips -g pixelWidth -g pixelHeight "$ICON"
+          else
+            echo "::warning::$ICON not found; electron-builder will use its default icon"
+          fi
+
       # build-mac runs `electron-builder -m` (mac.identity null => ad-hoc sign).
       - name: Build Chobby macOS app
         run: |
@@ -174,6 +187,243 @@ jobs:
               --title "Beyond All Reason (lobby + chobby) $TAG" \
               --notes "Combined macOS (arm64) bundle: BeyondAllReason.app (bar-lobby) and Beyond All Reason (Chobby).app. Both are thin launchers that fetch the shared engine from ExaDev/RecoilEngine at runtime. Ad-hoc signed (not notarised); after install clear quarantine: xattr -dr com.apple.quarantine \"/Applications/Beyond All Reason.app\" \"/Applications/Beyond All Reason (Chobby).app\""
           fi
+
+  # Windows counterpart of the macOS 'build' job: build the Chobby Windows app
+  # as a zip, fetch the latest bar-lobby Windows zip, and pack both into ONE
+  # combined zip (lobby/ + chobby/ subdirs) published to the same release tag.
+  # Mirrors the version/dist_cfg/make_package_json steps from 'build' exactly so
+  # the Windows and macOS bundles share a version number per push.
+  windows-bundle:
+    runs-on: windows-latest
+    steps:
+      # Same checkout as the mac job: BYAR-Chobby carries dist_cfg and the
+      # make_package_json.js helper, and fetch-depth: 0 is required for the
+      # `git rev-list --count HEAD` version number.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: BYAR-Chobby
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ExaDev/spring-launcher
+          ref: macos
+          path: launcher
+
+      - name: Setup NodeJs
+        uses: actions/setup-node@v4
+        with:
+          node-version: 16
+          cache: 'npm'
+          cache-dependency-path: launcher/package-lock.json
+
+      # Identical to the mac job, but in PowerShell because this leg runs on
+      # windows-latest: drop dist_cfg into the launcher's src/, then promote the
+      # bin/files/build subtrees up to the launcher root.
+      - name: Patch launcher with dist_cfg
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse BYAR-Chobby/dist_cfg/* launcher/src/
+          foreach ($dir in @('bin', 'files', 'build')) {
+            New-Item -ItemType Directory -Path "launcher/$dir" -Force | Out-Null
+            if (Test-Path "launcher/src/$dir") {
+              Move-Item "launcher/src/$dir/*" "launcher/$dir/" -Force
+              Remove-Item "launcher/src/$dir" -Recurse -Force
+            }
+          }
+
+      # Stamp version (1.<commit-count>.0), appId, name and repository into the
+      # launcher's package.json. Same helper and version formula as the mac job.
+      - name: Make package.json
+        shell: pwsh
+        run: |
+          Set-Location BYAR-Chobby
+          $PACKAGE_VERSION = "1.$(git rev-list --count HEAD).0"
+          Write-Host "Making build for version: $PACKAGE_VERSION"
+          node build/make_package_json.js ../launcher/package.json dist_cfg/config.json $env:GITHUB_REPOSITORY $PACKAGE_VERSION
+          "PACKAGE_VERSION=$PACKAGE_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Pin productName so the Chobby exe is "Beyond All Reason (Chobby).exe"
+      # (distinct from bar-lobby's "BeyondAllReason.exe"), and force a zip target
+      # with a predictable name. spring-launcher's build-win is `electron-builder
+      # -w` and its package.json sets no win.target, so without this override it
+      # would emit only an nsis installer, not an extractable zip.
+      - name: Override Windows productName and win zip target
+        shell: pwsh
+        run: |
+          Set-Location launcher
+          node -e '
+            const fs = require("fs");
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            p.build = p.build || {};
+            p.build.productName = "Beyond All Reason (Chobby)";
+            p.build.win = p.build.win || {};
+            p.build.win.target = ["zip"];
+            p.build.win.artifactName = "BeyondAllReason-Chobby-${version}-win-x64.${ext}";
+            fs.writeFileSync("package.json", JSON.stringify(p), "utf8");
+          '
+          node -e 'const p=require("./package.json"); console.log("productName:", p.build.productName); console.log("win.target:", p.build.win.target); console.log("win.artifactName:", p.build.win.artifactName); console.log("version:", p.version);'
+
+      - name: Cache electron
+        uses: actions/cache@v4
+        with:
+          path: .electron-cache
+          key: ${{ runner.os }}-electron-cache-${{ hashFiles('launcher/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-cache-
+
+      # build-win runs `electron-builder -w`; with the override above it emits
+      # launcher/dist/BeyondAllReason-Chobby-<version>-win-x64.zip.
+      - name: Build Chobby Windows zip
+        shell: pwsh
+        run: |
+          Set-Location launcher
+          npm ci
+          npm run build-win
+        env:
+          ELECTRON_CACHE: ${{ github.workspace }}/.electron-cache/main
+          ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.electron-cache/builder
+
+      # Assemble ONE combined zip carrying BOTH thin apps under named subdirs:
+      #   lobby/  -> BeyondAllReason.exe          (bar-lobby, latest release zip)
+      #   chobby/ -> Beyond All Reason (Chobby).exe (built above)
+      # Both are thin launchers that download the shared engine at runtime, so the
+      # combined zip stays small with no engine duplication. The single 'bar'
+      # Scoop manifest installs both with two shortcut entries.
+      - name: Assemble combined Windows bundle zip
+        id: bundle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $STAGE = "$env:RUNNER_TEMP/bar-bundle"
+          New-Item -ItemType Directory -Path $STAGE -Force | Out-Null
+
+          # 1. Chobby app from the zip we just built.
+          $CHOBBY_ZIP = "launcher/dist/BeyondAllReason-Chobby-$env:PACKAGE_VERSION-win-x64.zip"
+          if (-not (Test-Path $CHOBBY_ZIP)) {
+            Write-Host "::error::Chobby zip missing: $CHOBBY_ZIP"
+            Get-ChildItem "launcher/dist" -ErrorAction SilentlyContinue | Format-Table -AutoSize
+            exit 1
+          }
+          New-Item -ItemType Directory -Path "$STAGE/chobby" -Force | Out-Null
+          Expand-Archive -Path $CHOBBY_ZIP -DestinationPath "$STAGE/chobby" -Force
+
+          # 2. Latest bar-lobby Windows zip (public repo, token-free download).
+          $LOBBY_TAG = (gh release list --repo ExaDev/bar-lobby --limit 30 `
+            --json tagName,isDraft,publishedAt `
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))] | sort_by(.publishedAt) | reverse | .[0].tagName' | Out-String).Trim()
+          if (-not $LOBBY_TAG) {
+            Write-Host "::error::no bar-lobby release found"
+            exit 1
+          }
+          Write-Host "Using bar-lobby release $LOBBY_TAG"
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/lobby" -Force | Out-Null
+          gh release download $LOBBY_TAG --repo ExaDev/bar-lobby `
+            --pattern 'BeyondAllReason-*-win-x64.zip' --dir "$env:RUNNER_TEMP/lobby"
+          $LOBBY_ZIP = (Get-ChildItem "$env:RUNNER_TEMP/lobby/BeyondAllReason-*-win-x64.zip" | Select-Object -First 1).FullName
+          if (-not $LOBBY_ZIP) {
+            Write-Host "::error::bar-lobby Windows zip not found in download"
+            exit 1
+          }
+          New-Item -ItemType Directory -Path "$STAGE/lobby" -Force | Out-Null
+          Expand-Archive -Path $LOBBY_ZIP -DestinationPath "$STAGE/lobby" -Force
+
+          # 3. Build the combined zip (both subdirs).
+          $OUT = "$env:RUNNER_TEMP/BeyondAllReason-bundle-$env:PACKAGE_VERSION-win-x64.zip"
+          Compress-Archive -Path "$STAGE/lobby", "$STAGE/chobby" -DestinationPath $OUT -Force
+          "path=$OUT" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "name=$(Split-Path $OUT -Leaf)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Get-Item $OUT | Format-List
+
+      # Upload to the SAME release tag the mac 'build' job uses (v<version>), so
+      # the macOS DMG and the Windows bundle live on one release per push.
+      - name: Publish bundle to combined GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $TAG = "v$env:PACKAGE_VERSION"
+          $BUNDLE = "${{ steps.bundle.outputs.path }}"
+          $exists = gh release view $TAG --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $TAG $BUNDLE --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $TAG $BUNDLE `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Beyond All Reason (lobby + chobby) $TAG" `
+              --notes "Combined Windows (x64) bundle: lobby/ (bar-lobby) and chobby/ (Chobby launcher). Both are thin launchers that fetch the shared engine from ExaDev/RecoilEngine at runtime."
+          }
+
+  # Regenerate the single 'bar' Scoop manifest to point at the combined Windows
+  # bundle via the scoped SSH deploy key (no PAT). Mirrors bar-lobby's
+  # release.yml update-scoop structure; the combined bundle now owns scoop 'bar'.
+  update-scoop:
+    needs: windows-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bucket via SSH deploy key
+        uses: actions/checkout@v4
+        with:
+          repository: ExaDev/scoop-bar
+          ssh-key: ${{ secrets.CHOBBY_SCOOP_DEPLOY_KEY }}
+      - name: Update manifest to the combined bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(gh release list --repo ExaDev/BYAR-Chobby --limit 30 \
+            --json tagName,isDraft,publishedAt \
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))]
+                  | sort_by(.publishedAt) | reverse | .[0].tagName')
+          VERSION="${TAG#v}"
+          ASSET="BeyondAllReason-bundle-${VERSION}-win-x64.zip"
+          URL="https://github.com/ExaDev/BYAR-Chobby/releases/download/${TAG}/${ASSET}"
+          gh release view "$TAG" --repo ExaDev/BYAR-Chobby --json assets \
+            --jq '.assets[].name' | grep -qx "$ASSET" \
+            || { echo "::error::$ASSET not on $TAG"; exit 1; }
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors "$URL" -o /tmp/bundle.zip
+          SHA=$(shasum -a 256 /tmp/bundle.zip | cut -d' ' -f1)
+          [[ "$SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad sha256: $SHA"; exit 1; }
+          cat > bucket/bar.json <<JSON
+          {
+              "version": "${VERSION}",
+              "description": "Beyond All Reason: bar-lobby + Chobby (Windows)",
+              "homepage": "https://www.beyondallreason.info/",
+              "license": {
+                  "identifier": "MIT",
+                  "url": "https://github.com/ExaDev/bar-lobby/blob/master/LICENSE.md"
+              },
+              "architecture": {
+                  "64bit": {
+                      "url": "${URL}",
+                      "hash": "${SHA}"
+                  }
+              },
+              "shortcuts": [
+                  ["lobby\\\\BeyondAllReason.exe", "Beyond All Reason"],
+                  ["chobby\\\\Beyond All Reason (Chobby).exe", "Beyond All Reason (Chobby)"]
+              ],
+              "checkver": {
+                  "github": "https://github.com/ExaDev/BYAR-Chobby"
+              },
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/ExaDev/BYAR-Chobby/releases/download/v\$version/BeyondAllReason-bundle-\$version-win-x64.zip"
+                      }
+                  }
+              }
+          }
+          JSON
+          python3 -c "import json; json.load(open('bucket/bar.json'))"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/bar.json
+          git diff --cached --quiet || git commit -m "bar (lobby + chobby) ${VERSION}"
+          git push
 
   # Bump the single 'bar' cask to the combined bundle via the scoped SSH deploy
   # key (no PAT). The cask carries two app stanzas; only version + sha256 change.
