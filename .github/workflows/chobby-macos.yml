@@ -151,12 +151,21 @@ jobs:
           cp -R "$MNT_C/Beyond All Reason (Chobby).app" "$STAGE/"
           hdiutil detach "$MNT_C"
 
-          # 2. Latest bar-lobby thin DMG (public repo, token-free).
-          LOBBY_TAG=$(gh release list --repo ExaDev/bar-lobby --limit 30 \
+          # 2. Latest bar-lobby thin DMG. Pick the newest release that ALREADY
+          # carries the mac DMG asset (a release created seconds ago by a
+          # concurrent bar-lobby run may still be mid-upload, so the very latest
+          # tag can lack the asset).
+          LOBBY_TAG=""
+          for t in $(gh release list --repo ExaDev/bar-lobby --limit 30 \
             --json tagName,isDraft,publishedAt \
             --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))]
-                  | sort_by(.publishedAt) | reverse | .[0].tagName')
-          [ -n "$LOBBY_TAG" ] || { echo "::error::no bar-lobby release found"; exit 1; }
+                  | sort_by(.publishedAt) | reverse | .[].tagName'); do
+            if gh release view "$t" --repo ExaDev/bar-lobby --json assets \
+                 --jq '.assets[].name' | grep -q 'mac-arm64\.dmg$'; then
+              LOBBY_TAG="$t"; break
+            fi
+          done
+          [ -n "$LOBBY_TAG" ] || { echo "::error::no bar-lobby release with a mac DMG"; exit 1; }
           echo "Using bar-lobby release $LOBBY_TAG"
           mkdir -p "$RUNNER_TEMP/lobby"
           gh release download "$LOBBY_TAG" --repo ExaDev/bar-lobby \
@@ -316,21 +325,25 @@ jobs:
           New-Item -ItemType Directory -Path "$STAGE/chobby" -Force | Out-Null
           Expand-Archive -Path $CHOBBY_ZIP -DestinationPath "$STAGE/chobby" -Force
 
-          # 2. Latest bar-lobby Windows zip (public repo, token-free download).
-          $LOBBY_TAG = (gh release list --repo ExaDev/bar-lobby --limit 30 `
-            --json tagName,isDraft,publishedAt `
-            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))] | sort_by(.publishedAt) | reverse | .[0].tagName' | Out-String).Trim()
-          if (-not $LOBBY_TAG) {
-            Write-Host "::error::no bar-lobby release found"
-            exit 1
-          }
-          Write-Host "Using bar-lobby release $LOBBY_TAG"
+          # 2. Latest bar-lobby Windows zip. Pick the newest release that ALREADY
+          # carries the win zip asset (a concurrent bar-lobby run may have just
+          # created a release still mid-upload, so the newest tag can lack it).
           New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/lobby" -Force | Out-Null
-          gh release download $LOBBY_TAG --repo ExaDev/bar-lobby `
-            --pattern 'BeyondAllReason-*-win-x64.zip' --dir "$env:RUNNER_TEMP/lobby"
-          $LOBBY_ZIP = (Get-ChildItem "$env:RUNNER_TEMP/lobby/BeyondAllReason-*-win-x64.zip" | Select-Object -First 1).FullName
+          $LOBBY_ZIP = $null
+          $tags = gh release list --repo ExaDev/bar-lobby --limit 30 `
+            --json tagName,isDraft,publishedAt `
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("v"))] | sort_by(.publishedAt) | reverse | .[].tagName'
+          foreach ($t in $tags) {
+            $names = gh release view $t --repo ExaDev/bar-lobby --json assets --jq '.assets[].name'
+            if ($names -match 'win-x64\.zip') {
+              gh release download $t --repo ExaDev/bar-lobby `
+                --pattern 'BeyondAllReason-*-win-x64.zip' --dir "$env:RUNNER_TEMP/lobby"
+              $LOBBY_ZIP = (Get-ChildItem "$env:RUNNER_TEMP/lobby/BeyondAllReason-*-win-x64.zip" | Select-Object -First 1).FullName
+              if ($LOBBY_ZIP) { Write-Host "Using bar-lobby release $t"; break }
+            }
+          }
           if (-not $LOBBY_ZIP) {
-            Write-Host "::error::bar-lobby Windows zip not found in download"
+            Write-Host "::error::no bar-lobby release with a Windows zip"
             exit 1
           }
           New-Item -ItemType Directory -Path "$STAGE/lobby" -Force | Out-Null
