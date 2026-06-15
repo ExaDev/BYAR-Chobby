@@ -220,7 +220,7 @@
         {
             "package": {
                 "id": "macos",
-                "display": "Alpha",
+                "display": "2026.06.08 (test)",
                 "platform": "darwin"
             },
             "config_url": "https://launcher-config.beyondallreason.dev/config.json",
@@ -232,7 +232,49 @@
             "auto_download": true,
             "downloads": {
                 "engines": [
-                    "engine-macos-arm64-latest"
+                    "2026.06.08"
+                ],
+                "games": [
+                    "byar:test",
+                    "byar-chobby:test"
+                ],
+                "resources": [
+                    {
+                        "url": "https://pool-init.beyondallreason.dev/data.7z",
+                        "destination": "pool",
+                        "extract": true,
+                        "optional": true
+                    }
+                ]
+            },
+            "no_start_script": true,
+            "logs_s3_bucket": "bar-infologs",
+            "launch": {
+                "start_args": [
+                    "--menu",
+                    "rapid://byar-chobby:test"
+                ],
+                "springsettings": {
+                    "RapidTagResolutionOrder": "repos-cdn.beyondallreason.dev;repos.beyondallreason.dev"
+                }
+            }
+        },
+        {
+            "package": {
+                "id": "macos-stable",
+                "display": "2025.06.24 (stable)",
+                "platform": "darwin"
+            },
+            "config_url": "https://launcher-config.beyondallreason.dev/config.json",
+            "env_variables": {
+                "PRD_HTTP_SEARCH_URL": "https://files-cdn.beyondallreason.dev/find",
+                "PRD_RAPID_USE_STREAMER": "false",
+                "PRD_RAPID_REPO_MASTER": "https://repos-cdn.beyondallreason.dev/repos.gz"
+            },
+            "auto_download": true,
+            "downloads": {
+                "engines": [
+                    "2025.06.24"
                 ],
                 "games": [
                     "byar:test",
