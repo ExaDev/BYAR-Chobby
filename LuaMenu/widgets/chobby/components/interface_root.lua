@@ -36,8 +36,7 @@ function GetInterfaceRoot(optionsParent, mainWindowParent, fontFunction)
 	local mainButtonsWidth = 180
 	local mainButtonsWidthSmall = 140
 
-	local userStatusWidth = 265
-	local userStatusWidth = 333
+	local userStatusWidth = 351
 
 	local imageFudge = 0
 
@@ -228,7 +227,6 @@ function GetInterfaceRoot(optionsParent, mainWindowParent, fontFunction)
 	}
 
 	local status_panelButtons = Control:New {
-		width = (2 + panelWidthRel) .. "%",
 		bottom = 0,
 		right = 0,
 		height = panelButtonsHeight,
@@ -236,7 +234,7 @@ function GetInterfaceRoot(optionsParent, mainWindowParent, fontFunction)
 		parent = holder_status,
 		resizable = false,
 		draggable = false,
-		padding = {0, 0, 20, 0},
+		padding = {17, 0, 30, 0},
 		children = {}
 	}
 	local panelButtons_buttons = Control:New {
@@ -786,8 +784,11 @@ function GetInterfaceRoot(optionsParent, mainWindowParent, fontFunction)
 		submenuWindow_mainContent._relativeBounds.bottom = bottomPad
 		submenuWindow_mainContent:UpdateClientArea()
 
-		status_panelButtons._relativeBounds.right = rightPad
-		rightPanel_window:UpdateClientArea()
+		if doublePanelMode then
+			status_panelButtons:SetPos((100 - panelWidthRel) / 100 * screenWidth + middlePad - titleWidth)
+			status_panelButtons._relativeBounds.right = rightPad
+			status_panelButtons:UpdateClientArea()
+		end
 
 		buttons_exit._relativeBounds.bottom = (bottomPad > 0 and bottomPad) or 4
 		buttons_exit:UpdateClientArea()
