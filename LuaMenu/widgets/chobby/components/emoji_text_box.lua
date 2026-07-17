@@ -12,6 +12,7 @@ EmojiTextBox = Control:Inherit{
 	noFont = false,
 	emojiScale = 0.95,
 	emojiLinePadding = 2,
+	emojiInlinePadding = 2,
 	lines = {},
 	physicalLines = {},
 }
@@ -85,7 +86,11 @@ end
 function EmojiTextBox:GetEmojiYOffset(size)
 	local fontHeight = self.font and self.font.GetAscenderHeight and math.ceil(self.font:GetAscenderHeight()) or nil
 	fontHeight = fontHeight or (self.font and self.font.GetLineHeight and math.ceil(self.font:GetLineHeight())) or self:GetLineHeight()
-	return math.max(0, math.floor((fontHeight - size) * 0.5))
+	return math.floor((fontHeight - size) * 0.5)
+end
+
+function EmojiTextBox:GetEmojiInlinePadding(size)
+	return math.max(1, self.emojiInlinePadding or math.floor(size * 0.08))
 end
 
 function EmojiTextBox:GetTextWidth(text)
@@ -107,6 +112,8 @@ function EmojiTextBox:CreateTextToken(text, startIndex, endIndex, colorPrefix)
 end
 
 function EmojiTextBox:CreateEmojiToken(alias, startIndex, endIndex)
+	local size = self:GetEmojiSize()
+	local padding = self:GetEmojiInlinePadding(size)
 	return {
 		type = "emoji",
 		alias = alias,
@@ -114,7 +121,7 @@ function EmojiTextBox:CreateEmojiToken(alias, startIndex, endIndex)
 		endIndex = endIndex,
 		image = ChatEmojis and ChatEmojis.GetImageFile and ChatEmojis.GetImageFile(alias),
 		fallback = ChatEmojis and ChatEmojis.aliases and ChatEmojis.aliases[alias],
-		width = self:GetEmojiSize() + 2,
+		width = size + (padding * 2),
 	}
 end
 
@@ -177,8 +184,13 @@ function EmojiTextBox:BuildDrawRuns(tokens)
 	return runs
 end
 
-function EmojiTextBox:Tokenize(text)
+function EmojiTextBox:Tokenize(text, allowEmoji)
 	local tokens = {}
+	local emojiEnabled = (allowEmoji ~= false)
+		and ChatEmojis
+		and ChatEmojis.HasEmojiCandidate
+		and ChatEmojis.HasEmojiCandidate(text)
+
 	local pos = 1
 	local textLen = #text
 	local colorPrefix = ""
@@ -188,10 +200,10 @@ function EmojiTextBox:Tokenize(text)
 		if byte == 255 and pos + 3 <= textLen then
 			colorPrefix = string.sub(text, pos, pos + 3)
 			pos = pos + 4
-		elseif byte == 58 then
+		elseif emojiEnabled and byte == 58 then
 			local aliasEnd = string.find(text, ":", pos + 1, true)
 			local alias = aliasEnd and string.sub(text, pos + 1, aliasEnd - 1)
-			if IsAliasName(alias) and ChatEmojis and ChatEmojis.GetImageFile and ChatEmojis.GetImageFile(alias) then
+			if IsAliasName(alias) and ChatEmojis and ChatEmojis.IsAliasRenderable and ChatEmojis.IsAliasRenderable(alias) then
 				tokens[#tokens + 1] = self:CreateEmojiToken(alias, pos, aliasEnd)
 				pos = aliasEnd + 1
 			else
@@ -202,7 +214,7 @@ function EmojiTextBox:Tokenize(text)
 			local runStart = pos
 			while pos <= textLen do
 				local b = string.byte(text, pos)
-				if b == 255 or b == 58 then
+				if b == 255 or (emojiEnabled and b == 58) then
 					break
 				end
 				pos = pos + 1
@@ -291,7 +303,7 @@ end
 
 function EmojiTextBox:GeneratePhysicalLines(lineID)
 	local logicalLine = self.lines[lineID]
-	local tokens = self:Tokenize(logicalLine.text)
+	local tokens = self:Tokenize(logicalLine.text, logicalLine.allowEmoji)
 	local padding = self.padding
 	local maxWidth = math.max(1, self.width - padding[1] - padding[3])
 	local currentTokens = {}
@@ -341,7 +353,7 @@ function EmojiTextBox:UpdateLayout()
 	return true
 end
 
-function EmojiTextBox:SetText(newtext, tooltips, OnTextClick)
+function EmojiTextBox:SetText(newtext, tooltips, OnTextClick, allowEmoji)
 	newtext = newtext or ""
 	self.text = newtext
 	self.lines = {}
@@ -350,12 +362,13 @@ function EmojiTextBox:SetText(newtext, tooltips, OnTextClick)
 			text = line,
 			tooltips = tooltips,
 			OnTextClick = OnTextClick,
+			allowEmoji = (allowEmoji ~= false),
 		}
 	end
 	self:UpdateLayout()
 end
 
-function EmojiTextBox:AddLine(text, tooltips, OnTextClick)
+function EmojiTextBox:AddLine(text, tooltips, OnTextClick, allowEmoji)
 	if self.agressiveMaxLines and #self.lines > self.agressiveMaxLines then
 		local preserve = {}
 		for i = math.max(1, #self.lines - self.agressiveMaxLinesPreserve), #self.lines do
@@ -373,6 +386,7 @@ function EmojiTextBox:AddLine(text, tooltips, OnTextClick)
 		text = text or "",
 		tooltips = tooltips,
 		OnTextClick = OnTextClick,
+		allowEmoji = (allowEmoji ~= false),
 	}
 	self.text = self.text == "" and (text or "") or (self.text .. "\n" .. (text or ""))
 	self:UpdateLayout()
@@ -404,20 +418,21 @@ end
 
 function EmojiTextBox:DrawEmoji(token, x, y)
 	local size = self:GetEmojiSize()
+	local padding = self:GetEmojiInlinePadding(size)
 	local emojiY = y + self:GetEmojiYOffset(size)
 	local textureHandler = GetTextureHandler()
 	if token.image and textureHandler and textureHandler.LoadTexture then
 		gl.Color(1, 1, 1, 1)
 		local loaded = pcall(textureHandler.LoadTexture, 0, token.image, self)
 		if loaded then
-			gl.TexRect(x, emojiY, x + size, emojiY + size, false, true)
+			gl.TexRect(x + padding, emojiY, x + padding + size, emojiY + size, false, true)
 			gl.Texture(0, false)
 			return
 		end
 		gl.Texture(0, false)
 	end
 	if token.fallback then
-		self.font:Draw(token.fallback, x, y)
+		self.font:Draw(token.fallback, x + padding, y)
 	end
 end
 
