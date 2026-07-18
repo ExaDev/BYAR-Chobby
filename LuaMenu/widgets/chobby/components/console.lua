@@ -66,7 +66,7 @@ function Console:init(channelName, sendMessageListener, noHistoryLoad, onResizeF
 			obj._inmousemove = false
 		end},
 		OnMouseMove = { function(obj, x, y, dx, dy, button)
-			if button ~= 1 then
+			if button ~= 1 and button ~= true then
 				return
 			end
 			obj._inmousemove = true
